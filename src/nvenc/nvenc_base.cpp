@@ -11,12 +11,14 @@
 #include <cmath>
 #include <cstring>
 #include <format>
+#include <span>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 // local includes
 #include "nvenc_utils.h"
+#include "src/cbs.h"
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/utility.h"
@@ -486,6 +488,101 @@ namespace NVENC_NAMESPACE {
     }
   }
 
+  void nvenc_base::configure_lossless_refinement(NV_ENC_INITIALIZE_PARAMS &init_params, NV_ENC_CONFIG &enc_config) {
+    if (!get_encoder_cap(init_params.encodeGUID, NV_ENC_CAPS_SUPPORT_LOSSLESS_ENCODE)) {
+      BOOST_LOG(warning) << "NvEnc: gpu doesn't support lossless encode, lossless refinement is disabled";
+      return;
+    }
+
+    std::uint32_t block_size;
+    if (equal_guids(init_params.encodeGUID, NV_ENC_CODEC_HEVC_GUID)) {
+#if NVENC_SDK_VERSION >= 1300
+      // Lossless refinement wasn't tested with frames split across encoder engines
+      if (init_params.splitEncodeMode == NV_ENC_SPLIT_AUTO_FORCED_MODE) {
+        BOOST_LOG(warning) << "NvEnc: forced split-frame encoding isn't supported with lossless refinement for HEVC, lossless refinement is disabled";
+        return;
+      }
+      init_params.splitEncodeMode = NV_ENC_SPLIT_DISABLE_MODE;
+#endif
+      // The QP delta map has one value per coding tree block, so fix their size
+      enc_config.encodeCodecConfig.hevcConfig.maxCUSize = NV_ENC_HEVC_CUSIZE_32x32;
+      block_size = 32;
+    } else {
+      // Macroblocks with QP 0 bypass transform and quantization, which is lossless
+      enc_config.encodeCodecConfig.h264Config.qpPrimeYZeroTransformBypassFlag = 1;
+      // Deblocking would alter lossless pixels next to lossy macroblocks
+      enc_config.encodeCodecConfig.h264Config.disableDeblockingFilterIDC = 1;
+      block_size = 16;
+    }
+    enc_config.rcParams.qpMapMode = NV_ENC_QP_MAP_DELTA;
+    if (enc_config.rcParams.enableMinQP) {
+      BOOST_LOG(warning) << "NvEnc: lossless refinement needs QP 0, ignoring the minimum QP";
+      enc_config.rcParams.enableMinQP = 0;
+    }
+    // Adaptive quantization adds to the QP of busy blocks, which made lossless blocks lossy in tests
+    if (enc_config.rcParams.enableAQ) {
+      BOOST_LOG(warning) << "NvEnc: lossless refinement needs QP 0, ignoring adaptive quantization";
+      enc_config.rcParams.enableAQ = 0;
+    }
+
+    const auto map_width = video::lossless_block_count(encoder_params.width, block_size);
+    const auto map_height = video::lossless_block_count(encoder_params.height, block_size);
+    qp_delta_map.assign(std::size_t {map_width} * map_height, 0);
+    encoder_params.lossless_block_size = block_size;
+  }
+
+  bool nvenc_base::enable_hevc_transquant_bypass(const NV_ENC_INITIALIZE_PARAMS &init_params, NV_ENC_CONFIG &enc_config) {
+    NV_ENC_PRESET_CONFIG lossless_preset = {
+      .version = NV_ENC_PRESET_CONFIG_VER,
+      .presetCfg = {.version = NV_ENC_CONFIG_VER},
+    };
+    if (nvenc_failed(nvenc->nvEncGetEncodePresetConfigEx(encoder, init_params.encodeGUID, init_params.presetGUID, NV_ENC_TUNING_INFO_LOSSLESS, &lossless_preset))) {
+      BOOST_LOG(error) << "NvEnc: NvEncGetEncodePresetConfigEx() for lossless tuning failed: " << last_nvenc_error_string;
+      return false;
+    }
+    NV_ENC_CONFIG lossless_config = enc_config;
+    lossless_config.rcParams = lossless_preset.presetCfg.rcParams;
+    lossless_config.rcParams.qpMapMode = NV_ENC_QP_MAP_DELTA;
+
+    const auto reconfigure = [&](NV_ENC_CONFIG &config, NV_ENC_TUNING_INFO tuning_info) {
+      NV_ENC_RECONFIGURE_PARAMS reconfigure_params = {.version = NV_ENC_RECONFIGURE_PARAMS_VER};
+      reconfigure_params.reInitEncodeParams = init_params;
+      reconfigure_params.reInitEncodeParams.encodeConfig = &config;
+      reconfigure_params.reInitEncodeParams.tuningInfo = tuning_info;
+      return !nvenc_failed(nvenc->nvEncReconfigureEncoder(encoder, &reconfigure_params));
+    };
+    if (!reconfigure(lossless_config, NV_ENC_TUNING_INFO_LOSSLESS)) {
+      BOOST_LOG(error) << "NvEnc: NvEncReconfigureEncoder() to lossless tuning failed: " << last_nvenc_error_string;
+      return false;
+    }
+    if (!reconfigure(enc_config, init_params.tuningInfo)) {
+      BOOST_LOG(error) << "NvEnc: NvEncReconfigureEncoder() back from lossless tuning failed: " << last_nvenc_error_string;
+      return false;
+    }
+    return true;
+  }
+
+  bool nvenc_base::lossless_coding_enabled(const GUID &encode_guid) {
+    std::array<std::uint8_t, 1024> parameter_sets {};
+    std::uint32_t parameter_sets_size = 0;
+    NV_ENC_SEQUENCE_PARAM_PAYLOAD sequence_params = {.version = NV_ENC_SEQUENCE_PARAM_PAYLOAD_VER};
+    sequence_params.inBufferSize = static_cast<std::uint32_t>(parameter_sets.size());
+    sequence_params.spsppsBuffer = parameter_sets.data();
+    sequence_params.outSPSPPSPayloadSize = &parameter_sets_size;
+    if (nvenc_failed(nvenc->nvEncGetSequenceParams(encoder, &sequence_params))) {
+      BOOST_LOG(error) << "NvEnc: NvEncGetSequenceParams() failed: " << last_nvenc_error_string;
+      return false;
+    }
+
+    const auto sets = std::span {parameter_sets}.first(std::min<std::size_t>(parameter_sets_size, parameter_sets.size()));
+    const bool enabled = equal_guids(encode_guid, NV_ENC_CODEC_HEVC_GUID) ? cbs::hevc_transquant_bypass_enabled(sets) : cbs::h264_transform_bypass_enabled(sets);
+    if (!enabled) {
+      BOOST_LOG(warning) << "NvEnc: driver didn't enable lossless coding in the parameter sets";
+      return false;
+    }
+    return true;
+  }
+
   bool nvenc_base::initialize_encoder_resources(NV_ENC_INITIALIZE_PARAMS &init_params) {
     if (nvenc_failed(nvenc->nvEncInitializeEncoder(encoder, &init_params))) {
       BOOST_LOG(error) << "NvEnc: NvEncInitializeEncoder() failed: " << last_nvenc_error_string;
@@ -547,6 +644,9 @@ namespace NVENC_NAMESPACE {
     if (config.insert_filler_data) {
       extra += " filler-data";
     }
+    if (encoder_params.lossless_block_size > 0) {
+      extra += std::format(" lossless-refinement={}px-blocks", encoder_params.lossless_block_size);
+    }
 #if NVENC_SDK_VERSION >= 1300
     if (client_config.videoFormat > 0 && get_encoder_cap(init_params.encodeGUID, NV_ENC_CAPS_NUM_ENCODER_ENGINES) > 1) {
       if (init_params.splitEncodeMode == NV_ENC_SPLIT_AUTO_MODE) {
@@ -568,8 +668,29 @@ namespace NVENC_NAMESPACE {
     const video::sunshine_colorspace_t &sunshine_colorspace,
     platf::pix_fmt_e sunshine_buffer_format
   ) {
+    bool lossless_refinement = config.lossless_refinement;
+    if (lossless_refinement && !video::lossless_refinement_applicable(client_config)) {
+      BOOST_LOG(info) << "NvEnc: lossless refinement needs 8-bit H.264 YUV 4:4:4 or 8-bit HEVC and no intra refresh, not using it for this encoder";
+      lossless_refinement = false;
+    }
+
+    auto status = create_encoder_session(config, client_config, sunshine_colorspace, sunshine_buffer_format, lossless_refinement);
+    if (status == session_status_e::lossless_failed) {
+      BOOST_LOG(warning) << "NvEnc: failed to create encoder with lossless refinement, retrying without it";
+      status = create_encoder_session(config, client_config, sunshine_colorspace, sunshine_buffer_format, false);
+    }
+    return status == session_status_e::created;
+  }
+
+  nvenc_base::session_status_e nvenc_base::create_encoder_session(
+    const ::nvenc::nvenc_config &config,
+    const video::config_t &client_config,
+    const video::sunshine_colorspace_t &sunshine_colorspace,
+    platf::pix_fmt_e sunshine_buffer_format,
+    bool lossless_refinement
+  ) {
     if (!nvenc && !init_library()) {
-      return false;
+      return session_status_e::failed;
     }
     if (encoder) {
       destroy_encoder();
@@ -582,7 +703,7 @@ namespace NVENC_NAMESPACE {
     const auto buffer_format = nvenc_format_from_sunshine_format(sunshine_buffer_format);
     if (buffer_format == NV_ENC_BUFFER_FORMAT_UNDEFINED) {
       BOOST_LOG(error) << "NvEnc: unsupported input pixel format";
-      return false;
+      return session_status_e::failed;
     }
     encoder_params.width = client_config.width;
     encoder_params.height = client_config.height;
@@ -595,18 +716,18 @@ namespace NVENC_NAMESPACE {
     session_params.apiVersion = NVENCAPI_VERSION;
     if (nvenc_failed(nvenc->nvEncOpenEncodeSessionEx(&session_params, &encoder))) {
       BOOST_LOG(error) << "NvEnc: NvEncOpenEncodeSessionEx() failed: " << last_nvenc_error_string;
-      return false;
+      return session_status_e::failed;
     }
 
     std::uint32_t encode_guid_count = 0;
     if (nvenc_failed(nvenc->nvEncGetEncodeGUIDCount(encoder, &encode_guid_count))) {
       BOOST_LOG(error) << "NvEnc: NvEncGetEncodeGUIDCount() failed: " << last_nvenc_error_string;
-      return false;
+      return session_status_e::failed;
     }
     std::vector<GUID> encode_guids(encode_guid_count);
     if (nvenc_failed(nvenc->nvEncGetEncodeGUIDs(encoder, encode_guids.data(), static_cast<std::uint32_t>(encode_guids.size()), &encode_guid_count))) {
       BOOST_LOG(error) << "NvEnc: NvEncGetEncodeGUIDs() failed: " << last_nvenc_error_string;
-      return false;
+      return session_status_e::failed;
     }
 
     NV_ENC_INITIALIZE_PARAMS init_params = {.version = NV_ENC_INITIALIZE_PARAMS_VER};
@@ -624,14 +745,14 @@ namespace NVENC_NAMESPACE {
 #endif
       default:
         BOOST_LOG(error) << "NvEnc: unknown video format " << client_config.videoFormat;
-        return false;
+        return session_status_e::failed;
     }
     if (!contains_guid(encode_guids, init_params.encodeGUID)) {
       BOOST_LOG(error) << "NvEnc: encoding format is not supported by the gpu";
-      return false;
+      return session_status_e::failed;
     }
     if (!validate_encoder_capabilities(init_params.encodeGUID, buffer_format)) {
-      return false;
+      return session_status_e::failed;
     }
 
     init_params.presetGUID = quality_preset_guid_from_number(config.quality_preset);
@@ -655,16 +776,28 @@ namespace NVENC_NAMESPACE {
     };
     if (nvenc_failed(nvenc->nvEncGetEncodePresetConfigEx(encoder, init_params.encodeGUID, init_params.presetGUID, init_params.tuningInfo, &preset_config))) {
       BOOST_LOG(error) << "NvEnc: NvEncGetEncodePresetConfigEx() failed: " << last_nvenc_error_string;
-      return false;
+      return session_status_e::failed;
     }
 
     NV_ENC_CONFIG enc_config = preset_config.presetCfg;
     enc_config.profileGUID = NV_ENC_CODEC_PROFILE_AUTOSELECT_GUID;
     configure_rate_control(enc_config, config, client_config, init_params.encodeGUID);
     configure_codec(enc_config, config, client_config, colorspace, buffer_format, init_params.encodeGUID);
+    if (lossless_refinement) {
+      configure_lossless_refinement(init_params, enc_config);
+    }
     init_params.encodeConfig = &enc_config;
+    const auto failed = encoder_params.lossless_block_size > 0 ? session_status_e::lossless_failed : session_status_e::failed;
     if (!initialize_encoder_resources(init_params)) {
-      return false;
+      return failed;
+    }
+    if (encoder_params.lossless_block_size > 0) {
+      if (equal_guids(init_params.encodeGUID, NV_ENC_CODEC_HEVC_GUID) && !enable_hevc_transquant_bypass(init_params, enc_config)) {
+        return failed;
+      }
+      if (!lossless_coding_enabled(init_params.encodeGUID)) {
+        return failed;
+      }
     }
 
     auto frame_size_format = stat_trackers::two_digits_after_decimal();
@@ -674,7 +807,7 @@ namespace NVENC_NAMESPACE {
 
     encoder_state = {};
     fail_guard.disable();
-    return true;
+    return session_status_e::created;
   }
 
   void nvenc_base::destroy_encoder() {
@@ -708,7 +841,11 @@ namespace NVENC_NAMESPACE {
     encoder_params = {};
   }
 
-  ::nvenc::nvenc_encoded_frame nvenc_base::encode_frame(uint64_t frame_index, bool force_idr) {
+  std::uint32_t nvenc_base::lossless_block_size() const {
+    return encoder_params.lossless_block_size;
+  }
+
+  ::nvenc::nvenc_encoded_frame nvenc_base::encode_frame(uint64_t frame_index, bool force_idr, std::span<const video::lossless_block_rect_t> lossless_blocks) {
     if (!encoder) {
       return {};
     }
@@ -744,6 +881,14 @@ namespace NVENC_NAMESPACE {
     pic_params.bufferFmt = mapped_input_buffer.mappedBufferFmt;
     pic_params.outputBitstream = output_bitstream;
     pic_params.completionEvent = async_event_handle;
+
+    if (encoder_params.lossless_block_size > 0) {
+      const auto map_width = video::lossless_block_count(encoder_params.width, encoder_params.lossless_block_size);
+      // A delta of -51 brings any QP down to 0
+      video::fill_lossless_block_map(std::span {qp_delta_map}, map_width, lossless_blocks, std::int8_t {-51});
+      pic_params.qpDeltaMap = qp_delta_map.data();
+      pic_params.qpDeltaMapSize = static_cast<uint32_t>(qp_delta_map.size());
+    }
 
     if (nvenc_failed(nvenc->nvEncEncodePicture(encoder, &pic_params))) {
       BOOST_LOG(error) << "NvEnc: NvEncEncodePicture() failed: " << last_nvenc_error_string;
@@ -782,6 +927,10 @@ namespace NVENC_NAMESPACE {
     if (encoded_frame.idr) {
       BOOST_LOG(debug) << "NvEnc: idr frame " << encoded_frame.frame_index;
     }
+    if (encoder_params.lossless_block_size > 0 && !lossless_blocks.empty()) {
+      BOOST_LOG(verbose) << "NvEnc: frame " << encoded_frame.frame_index << " " << lossless_blocks.size() << " lossless block areas, "
+                         << encoded_frame.data.size() / 1000. << " kB, average QP " << lock_bitstream.frameAvgQP;
+    }
 
     if (nvenc_failed(nvenc->nvEncUnlockBitstream(encoder, lock_bitstream.outputBitstream))) {
       BOOST_LOG(error) << "NvEnc: NvEncUnlockBitstream() failed: " << last_nvenc_error_string;
@@ -792,21 +941,21 @@ namespace NVENC_NAMESPACE {
     return encoded_frame;
   }
 
-  bool nvenc_base::invalidate_ref_frames(uint64_t first_frame, uint64_t last_frame) {
+  video::ref_frames_invalidation_e nvenc_base::invalidate_ref_frames(uint64_t first_frame, uint64_t last_frame) {
     if (!encoder || !encoder_params.rfi) {
-      return false;
+      return video::ref_frames_invalidation_e::idr;
     }
 
     if (first_frame >= encoder_state.last_rfi_range.first && last_frame <= encoder_state.last_rfi_range.second) {
       BOOST_LOG(debug) << "NvEnc: rfi request " << first_frame << "-" << last_frame << " already done";
-      return true;
+      return video::ref_frames_invalidation_e::already_invalidated;
     }
 
     encoder_state.rfi_needs_confirmation = true;
 
     if (last_frame < first_frame) {
       BOOST_LOG(error) << "NvEnc: invaid rfi request " << first_frame << "-" << last_frame << ", generating IDR";
-      return false;
+      return video::ref_frames_invalidation_e::idr;
     }
 
     BOOST_LOG(debug) << "NvEnc: rfi request " << first_frame << "-" << last_frame << " expanding to last encoded frame " << encoder_state.last_encoded_frame_index;
@@ -816,17 +965,17 @@ namespace NVENC_NAMESPACE {
 
     if (last_frame - first_frame + 1 >= encoder_params.ref_frames_in_dpb) {
       BOOST_LOG(debug) << "NvEnc: rfi request too large, generating IDR";
-      return false;
+      return video::ref_frames_invalidation_e::idr;
     }
 
     for (auto i = first_frame; i <= last_frame; i++) {
       if (nvenc_failed(nvenc->nvEncInvalidateRefFrames(encoder, i))) {
         BOOST_LOG(error) << "NvEnc: NvEncInvalidateRefFrames() " << i << " failed: " << last_nvenc_error_string;
-        return false;
+        return video::ref_frames_invalidation_e::idr;
       }
     }
 
-    return true;
+    return video::ref_frames_invalidation_e::invalidated;
   }
 
   bool nvenc_base::nvenc_failed(NVENCSTATUS status) {

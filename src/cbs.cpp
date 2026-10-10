@@ -294,4 +294,42 @@ namespace cbs {
 
     return ((CodedBitstreamH265Context *) ctx->priv_data)->active_sps->vui_parameters_present_flag;
   }
+
+  /**
+   * @brief Read a flag of the first parameter set of a type in a byte stream.
+   *
+   * @tparam T FFmpeg's raw structure of the parameter set.
+   * @param codec_id Codec of the byte stream.
+   * @param unit_type NAL unit type of the parameter set.
+   * @param parameter_sets Annex B byte stream with the parameter set and the ones it refers to.
+   * @param flag Flag to read.
+   * @return Value of the flag, `false` when the parameter set is missing or can't be read.
+   */
+  template<class T>
+  bool parameter_set_flag(AVCodecID codec_id, int unit_type, std::span<const std::uint8_t> parameter_sets, std::uint8_t T::*flag) {
+    cbs::ctx_t ctx;
+    if (ff_cbs_init(&ctx, codec_id, nullptr)) {
+      return false;
+    }
+
+    cbs::frag_t frag;
+    if (ff_cbs_read(ctx.get(), &frag, nullptr, parameter_sets.data(), parameter_sets.size()) < 0) {
+      return false;
+    }
+
+    for (const auto &unit : std::span {frag.units, static_cast<std::size_t>(frag.nb_units)}) {
+      if (unit.type == unit_type && unit.content) {
+        return static_cast<const T *>(unit.content)->*flag;
+      }
+    }
+    return false;
+  }
+
+  bool h264_transform_bypass_enabled(std::span<const std::uint8_t> parameter_sets) {
+    return parameter_set_flag(AV_CODEC_ID_H264, H264_NAL_SPS, parameter_sets, &H264RawSPS::qpprime_y_zero_transform_bypass_flag);
+  }
+
+  bool hevc_transquant_bypass_enabled(std::span<const std::uint8_t> parameter_sets) {
+    return parameter_set_flag(AV_CODEC_ID_H265, HEVC_NAL_PPS, parameter_sets, &H265RawPPS::transquant_bypass_enabled_flag);
+  }
 }  // namespace cbs

@@ -295,6 +295,17 @@ namespace platf::dxgi {
   };
 
   /**
+   * @brief Convert a rectangle of the unrotated Desktop Duplication surface to display coordinates.
+   *
+   * @param rect Rectangle in surface pixels.
+   * @param rotation Rotation of the display.
+   * @param display_width Display width after rotation.
+   * @param display_height Display height after rotation.
+   * @return Rectangle in display pixels.
+   */
+  platf::damage_rect_t display_rect_from_surface(const RECT &rect, DXGI_MODE_ROTATION rotation, int display_width, int display_height);
+
+  /**
    * @brief Shared D3D11/DXGI state used by Windows display capture backends.
    */
   class display_base_t: public display_t {
@@ -619,6 +630,14 @@ namespace platf::dxgi {
      */
     capture_e release_frame();
 
+    /**
+     * @brief Get the areas of the desktop that changed with the acquired frame.
+     *
+     * @param frame_info Information about the acquired frame.
+     * @return Dirty and moved-to areas in surface coordinates, `std::nullopt` on error.
+     */
+    std::optional<std::vector<RECT>> changed_rects(const DXGI_OUTDUPL_FRAME_INFO &frame_info);
+
     ~duplication_t();
   };
 
@@ -702,6 +721,8 @@ namespace platf::dxgi {
     texture2d_t old_surface_delayed_destruction;  ///< Old surface delayed destruction.
     std::chrono::steady_clock::time_point old_surface_timestamp;  ///< Old surface timestamp.
     std::variant<std::monostate, texture2d_t, std::shared_ptr<platf::img_t>> last_frame_variant;  ///< Last frame variant.
+    std::optional<platf::damage_rect_t> last_blended_cursor;  ///< Cursor area blended into the last image.
+    std::uint64_t capture_sequence = 0;  ///< Number of the last capture.
   };
 
   /**

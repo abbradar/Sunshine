@@ -155,6 +155,8 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/globals.h"
         "${CMAKE_SOURCE_DIR}/src/logging.cpp"
         "${CMAKE_SOURCE_DIR}/src/logging.h"
+        "${CMAKE_SOURCE_DIR}/src/lossless_refinement.cpp"
+        "${CMAKE_SOURCE_DIR}/src/lossless_refinement.h"
         "${CMAKE_SOURCE_DIR}/src/main.cpp"
         "${CMAKE_SOURCE_DIR}/src/main.h"
         "${CMAKE_SOURCE_DIR}/src/crypto.cpp"

@@ -116,7 +116,9 @@
       "nvenc_split_encode": "driver_decides",
       "nvenc_latency_over_power": "enabled",
       "nvenc_opengl_vulkan_on_dxgi": "enabled",
-      "nvenc_h264_cavlc": "disabled"
+      "nvenc_h264_cavlc": "disabled",
+      "nvenc_lossless_refinement": "disabled",
+      "nvenc_lossless_refinement_delay": 100
     }
   },
   {
