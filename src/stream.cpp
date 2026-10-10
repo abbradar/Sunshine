@@ -13,6 +13,7 @@
 
 // lib includes
 #include <boost/endian/arithmetic.hpp>
+#include <lizardbyte/common/env.h>
 #include <openssl/err.h>
 #include <rs.h>
 
@@ -1516,6 +1517,47 @@ namespace stream {
   }
 
   /**
+   * @brief Compute the largest encoded video frame the stream protects with FEC.
+   *
+   * @param packetsize Video packet size negotiated with the client.
+   * @param fec_percentage Percentage of FEC shards relative to data shards.
+   * @return Frame size in bytes, larger frames are sent without FEC.
+   */
+  int max_fec_frame_size(int packetsize, int fec_percentage) {
+    // Same limits as in videoBroadcastThread(), which also prepends a short frame header
+    constexpr auto MAX_FEC_BLOCKS = 4;
+    const auto max_data_shards_per_fec_block = (DATA_SHARDS_MAX * 100) / (100 + fec_percentage);
+    const auto payload_blocksize = packetsize + MAX_RTP_HEADER_SIZE - static_cast<int>(sizeof(video_packet_raw_t));
+    return MAX_FEC_BLOCKS * max_data_shards_per_fec_block * payload_blocksize - static_cast<int>(sizeof(video_short_frame_header_t));
+  }
+
+  /**
+   * @brief Append a streamed video frame to the file named by `SUNSHINE_DEBUG_VIDEO_DUMP`, if set.
+   * Frames of all sessions go into the same file.
+   *
+   * @param payload Encoded video frame as sent to the client.
+   */
+  void debug_dump_video_frame(std::string_view payload) {
+    static std::ofstream dump_file = [] {
+      std::ofstream file;
+      if (const auto path = lizardbyte::common::get_env("SUNSHINE_DEBUG_VIDEO_DUMP"); !path.empty()) {
+        file.open(path, std::ios::binary);
+        if (file.is_open()) {
+          BOOST_LOG(warning) << "Dumping streamed video to "sv << path;
+        } else {
+          BOOST_LOG(error) << "Couldn't open "sv << path << " to dump streamed video"sv;
+        }
+      }
+      return file;
+    }();
+
+    if (dump_file.is_open()) {
+      dump_file.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+      dump_file.flush();
+    }
+  }
+
+  /**
    * @brief Run the broadcast video sender thread.
    *
    * @param sock Socket used to read or write the protocol message.
@@ -1571,6 +1613,8 @@ namespace stream {
           payload = {(char *) payload_with_replacements.data(), payload_with_replacements.size()};
         }
       }
+
+      debug_dump_video_frame(payload);
 
       video_short_frame_header_t frame_header = {};
       frame_header.headerType = 0x01;  // Short header type
@@ -2145,6 +2189,9 @@ namespace stream {
     // Enable local prioritization and QoS tagging on video traffic if requested by the client
     auto address = session->video.peer.address();
     session->video.qos = platf::enable_socket_qos(ref->video_sock.native_handle(), address, session->video.peer.port(), platf::qos_data_type_e::video, session->config.videoQosType != 0);
+
+    // Lets lossless refinement keep its frames small enough for FEC
+    session->config.monitor.maxFecFrameSize = max_fec_frame_size(session->config.packetsize, config::stream.fec_percentage);
 
     BOOST_LOG(debug) << "Start capturing Video"sv;
     video::capture(session->mail, session->config.monitor, session);

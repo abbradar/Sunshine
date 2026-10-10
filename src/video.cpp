@@ -31,6 +31,7 @@ extern "C" {
 #include "globals.h"
 #include "input.h"
 #include "logging.h"
+#include "lossless_refinement.h"
 #include "nvenc/nvenc_encoder.h"
 #include "platform/common.h"
 #include "sync.h"
@@ -522,10 +523,12 @@ namespace video {
      *
      * @param first_frame First frame.
      * @param last_frame Last frame.
+     * @return Always `ref_frames_invalidation_e::idr`.
      */
-    void invalidate_ref_frames(int64_t first_frame, int64_t last_frame) override {
+    ref_frames_invalidation_e invalidate_ref_frames(int64_t first_frame, int64_t last_frame) override {
       BOOST_LOG(error) << "Encoder doesn't support reference frame invalidation";
       request_idr_frame();
+      return ref_frames_invalidation_e::idr;
     }
 
     avcodec_ctx_t avcodec_ctx;  ///< FFmpeg codec context owned by the encode session.
@@ -586,29 +589,42 @@ namespace video {
      *
      * @param first_frame First frame.
      * @param last_frame Last frame.
+     * @return Whether the frames were invalidated, or the next frame is an IDR frame instead.
      */
-    void invalidate_ref_frames(int64_t first_frame, int64_t last_frame) override {
+    ref_frames_invalidation_e invalidate_ref_frames(int64_t first_frame, int64_t last_frame) override {
       if (!device || !device->nvenc) {
-        return;
+        return ref_frames_invalidation_e::idr;
       }
 
-      if (!device->nvenc->invalidate_ref_frames(first_frame, last_frame)) {
+      const auto result = device->nvenc->invalidate_ref_frames(first_frame, last_frame);
+      if (result == ref_frames_invalidation_e::idr) {
         force_idr = true;
       }
+      return result;
+    }
+
+    /**
+     * @brief Get the size of the blocks the encoder can encode losslessly.
+     *
+     * @return Block size in pixels, zero when lossless refinement is off.
+     */
+    std::uint32_t lossless_block_size() const override {
+      return device && device->nvenc ? device->nvenc->lossless_block_size() : 0;
     }
 
     /**
      * @brief Submit the next frame to NVENC and return the encoded payload.
      *
      * @param frame_index Monotonic frame index assigned by the video pipeline.
+     * @param lossless_blocks Rectangles of blocks to encode losslessly.
      * @return Encoded NVENC frame payload and frame metadata.
      */
-    nvenc::nvenc_encoded_frame encode_frame(uint64_t frame_index) {
+    nvenc::nvenc_encoded_frame encode_frame(uint64_t frame_index, std::span<const lossless_block_rect_t> lossless_blocks) {
       if (!device || !device->nvenc) {
         return {};
       }
 
-      auto result = device->nvenc->encode_frame(frame_index, force_idr);
+      auto result = device->nvenc->encode_frame(frame_index, force_idr, lossless_blocks);
       force_idr = false;
       return result;
     }
@@ -1686,7 +1702,7 @@ namespace video {
         if (img_out) {
           // trim allocated but unused portion of the pool based on timeouts
           trim_imgs();
-          img_out->frame_timestamp.reset();
+          img_out->reset_capture_info();
           return true;
         } else {
           // sleep and retry if image pool is full
@@ -1907,10 +1923,12 @@ namespace video {
    * @param packets Output queue that receives the encoded packet.
    * @param channel_data Platform or protocol state attached to the packet.
    * @param frame_timestamp Capture timestamp associated with the encoded frame.
+   * @param lossless_blocks Rectangles of blocks to encode losslessly.
+   * @param encoded_size Receives the encoded frame size in bytes, if not null.
    * @return 0 when packets are queued; nonzero when NVENC encoding fails.
    */
-  int encode_nvenc(int64_t frame_nr, nvenc_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
-    auto encoded_frame = session.encode_frame(frame_nr);
+  int encode_nvenc(int64_t frame_nr, nvenc_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp, std::span<const lossless_block_rect_t> lossless_blocks, std::size_t *encoded_size) {
+    auto encoded_frame = session.encode_frame(frame_nr, lossless_blocks);
     if (encoded_frame.data.empty()) {
       BOOST_LOG(error) << "NvENC returned empty packet";
       return -1;
@@ -1920,6 +1938,9 @@ namespace video {
       BOOST_LOG(error) << "NvENC frame index mismatch " << frame_nr << " " << encoded_frame.frame_index;
     }
 
+    if (encoded_size) {
+      *encoded_size = encoded_frame.data.size();
+    }
     auto packet = std::make_unique<packet_raw_generic>(std::move(encoded_frame.data), encoded_frame.frame_index, encoded_frame.idr);
     packet->channel_data = channel_data;
     packet->after_ref_frame_invalidation = encoded_frame.after_ref_frame_invalidation;
@@ -1937,13 +1958,15 @@ namespace video {
    * @param packets Packets queued or emitted by the stream.
    * @param channel_data Channel data.
    * @param frame_timestamp Frame timestamp.
+   * @param lossless_blocks Rectangles of blocks to encode losslessly.
+   * @param encoded_size Receives the encoded frame size in bytes from NVENC sessions, if not null.
    * @return 0 when the frame is encoded and queued; nonzero on encoder failure.
    */
-  int encode(int64_t frame_nr, encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
+  int encode(int64_t frame_nr, encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp, std::span<const lossless_block_rect_t> lossless_blocks = {}, std::size_t *encoded_size = nullptr) {
     if (auto avcodec_session = dynamic_cast<avcodec_encode_session_t *>(&session)) {
       return encode_avcodec(frame_nr, *avcodec_session, packets, channel_data, frame_timestamp);
     } else if (auto nvenc_session = dynamic_cast<nvenc_encode_session_t *>(&session)) {
-      return encode_nvenc(frame_nr, *nvenc_session, packets, channel_data, frame_timestamp);
+      return encode_nvenc(frame_nr, *nvenc_session, packets, channel_data, frame_timestamp, lossless_blocks, encoded_size);
     }
 
     return -1;
@@ -2436,11 +2459,28 @@ namespace video {
     double minimum_fps_target = (config::video.minimum_fps_target > 0.0) ? config::video.minimum_fps_target : (config.framerate / 2);
     std::chrono::duration<double, std::milli> max_frametime {1000.0 / minimum_fps_target};
     BOOST_LOG(info) << "Minimum FPS target set to ~"sv << minimum_fps_target << "fps ("sv << max_frametime.count() << "ms)"sv;
+    const auto max_wait = std::chrono::duration_cast<std::chrono::steady_clock::duration>(max_frametime);
 
     auto shutdown_event = mail->event<bool>(mail::shutdown);
     auto packets = mail::man->queue<packet_t>(mail::video_packets);
     auto idr_events = mail->event<bool>(mail::idr);
     auto invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
+
+    lossless_refinement_t lossless {
+      {
+        .display_width = disp->width,
+        .display_height = disp->height,
+        .frame_width = config.width,
+        .frame_height = config.height,
+        .block_size = session->lossless_block_size(),
+        .yuv444 = config.chromaSamplingType == 1,
+        .max_frame_bytes = static_cast<std::uint64_t>(std::max(config.maxFecFrameSize, 0)),
+      },
+      std::chrono::milliseconds {config::video.lossless_refinement_delay_ms},
+      capture_frame_interval(config),
+      config.bitrate,
+      std::chrono::steady_clock::now(),
+    };
 
     {
       // Load a dummy image into the AVFrame to ensure we have something to encode
@@ -2458,7 +2498,16 @@ namespace video {
 
       while (invalidate_ref_frames_events->peek()) {
         if (auto frames = invalidate_ref_frames_events->pop(0ms)) {
-          session->invalidate_ref_frames(frames->first, frames->second);
+          switch (session->invalidate_ref_frames(frames->first, frames->second)) {
+            case ref_frames_invalidation_e::invalidated:
+              lossless.frames_invalidated(frames->first, std::chrono::steady_clock::now());
+              break;
+            case ref_frames_invalidation_e::already_invalidated:
+              break;
+            case ref_frames_invalidation_e::idr:
+              lossless.frames_lost(std::chrono::steady_clock::now());
+              break;
+          }
         }
       }
 
@@ -2469,14 +2518,17 @@ namespace video {
 
       if (requested_idr_frame) {
         session->request_idr_frame();
+        lossless.frames_lost(std::chrono::steady_clock::now());
       }
 
       std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
 
-      // Encode at a minimum FPS to avoid image quality issues with static content
+      // Encode at a minimum FPS to avoid image quality issues with static content,
+      // or earlier when lossless refinement needs the next frame
       if (!requested_idr_frame || images->peek()) {
-        if (auto img = images->pop(max_frametime)) {
+        if (auto img = images->pop(lossless.wait_time(std::chrono::steady_clock::now(), max_wait))) {
           frame_timestamp = img->frame_timestamp;
+          lossless.image_captured(*img, std::chrono::steady_clock::now());
           if (session->convert(*img)) {
             BOOST_LOG(error) << "Could not convert image"sv;
             return;
@@ -2500,9 +2552,17 @@ namespace video {
         break;
       }
 
-      if (encode(frame_nr++, *session, packets, channel_data, frame_timestamp)) {
+      const auto frame_index = frame_nr++;
+      const auto lossless_frame = lossless.next_frame(std::chrono::steady_clock::now(), frame_index);
+      std::size_t encoded_size = 0;
+      if (encode(frame_index, *session, packets, channel_data, frame_timestamp, lossless_frame.blocks, &encoded_size)) {
         BOOST_LOG(error) << "Could not encode video packet"sv;
         return;
+      }
+      lossless.frame_encoded(encoded_size);
+      if (lossless_frame.refined_band) {
+        BOOST_LOG(debug) << "Lossless refinement: frame " << frame_index << " band " << *lossless_frame.refined_band + 1 << "/" << lossless.band_count()
+                         << ", " << encoded_size / 1000. << " kB";
       }
 
       session->request_normal_frame();
@@ -2819,7 +2879,7 @@ namespace video {
 
       auto pull_free_image_callback = [&img](std::shared_ptr<platf::img_t> &img_out) -> bool {
         img_out = img;
-        img_out->frame_timestamp.reset();
+        img_out->reset_capture_info();
         return true;
       };
 

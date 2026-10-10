@@ -207,6 +207,35 @@ namespace platf::dxgi {
     }
   }
 
+  std::optional<std::vector<RECT>> duplication_t::changed_rects(const DXGI_OUTDUPL_FRAME_INFO &frame_info) {
+    if (frame_info.TotalMetadataBufferSize == 0) {
+      return std::vector<RECT> {};
+    }
+
+    // The metadata holds both kinds of rectangles, moved areas only change at their destination
+    std::vector<DXGI_OUTDUPL_MOVE_RECT> moves(frame_info.TotalMetadataBufferSize / sizeof(DXGI_OUTDUPL_MOVE_RECT));
+    UINT moves_size = 0;
+    if (!moves.empty()) {
+      if (auto status = dup->GetFrameMoveRects(moves.size() * sizeof(DXGI_OUTDUPL_MOVE_RECT), moves.data(), &moves_size); FAILED(status)) {
+        BOOST_LOG(warning) << "Couldn't get moved areas of the frame [0x"sv << util::hex(status).to_string_view() << ']';
+        return std::nullopt;
+      }
+    }
+    moves.resize(moves_size / sizeof(DXGI_OUTDUPL_MOVE_RECT));
+
+    std::vector<RECT> rects(frame_info.TotalMetadataBufferSize / sizeof(RECT));
+    UINT dirty_size = 0;
+    if (auto status = dup->GetFrameDirtyRects(rects.size() * sizeof(RECT), rects.data(), &dirty_size); FAILED(status)) {
+      BOOST_LOG(warning) << "Couldn't get dirty areas of the frame [0x"sv << util::hex(status).to_string_view() << ']';
+      return std::nullopt;
+    }
+    rects.resize(dirty_size / sizeof(RECT));
+    for (const auto &move : moves) {
+      rects.push_back(move.DestinationRect);
+    }
+    return rects;
+  }
+
   duplication_t::~duplication_t() {
     release_frame();
   }

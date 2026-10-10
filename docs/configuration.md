@@ -2671,6 +2671,69 @@ consent prompt for directory ACLs, so the Web UI shows setup steps for correctin
     </tr>
 </table>
 
+### nvenc_lossless_refinement
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Refine static content to a lossless image. Once nothing on screen has changed for
+            [nvenc_lossless_refinement_delay](#nvenc_lossless_refinement_delay), Sunshine re-encodes the frame
+            losslessly, one horizontal band per frame, paced to the requested bitrate. Moving content stays lossy.
+            With the `ddx` [capture](#capture) method, refinement continues in unchanged areas while others change,
+            and small changes like the mouse pointer or typing are encoded losslessly right away.
+            The result is lossless relative to Sunshine's YUV image, in the chroma subsampling selected in the client.
+            @note{This option only applies when using NVENC [encoder](#encoder) with 8-bit color, no intra refresh,
+            and either HEVC or H.264 with YUV 4:4:4, which clients can only decode in software.
+            It turns off [nvenc_spatial_aq](#nvenc_spatial_aq) and, for H.264, the deblocking filter.
+            With HEVC it also needs driver support and disables split-frame encoding, unless
+            [nvenc_split_encode](#nvenc_split_encode) is `enabled`, which disables refinement instead.}
+            @note{Applies to Windows only.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            nvenc_lossless_refinement = enabled
+            @endcode</td>
+    </tr>
+</table>
+
+### nvenc_lossless_refinement_delay
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Time in milliseconds without new content before [lossless refinement](#nvenc_lossless_refinement) starts.
+            Refinement never starts earlier than one frame after new content.
+            @note{Applies to Windows only.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            100
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Range</td>
+        <td colspan="2">0-10000</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            nvenc_lossless_refinement_delay = 100
+            @endcode</td>
+    </tr>
+</table>
+
 ## Intel QuickSync Encoder
 
 ### qsv_preset

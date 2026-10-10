@@ -22,7 +22,16 @@
 namespace stream {
   std::vector<uint8_t> concat_and_insert(uint64_t insert_size, uint64_t slice_size, const std::string_view &data1, const std::string_view &data2);
   std::optional<std::pair<std::uint16_t, std::string_view>> parse_control_packet(const ENetPacket &packet);
+  int max_fec_frame_size(int packetsize, int fec_percentage);
 }  // namespace stream
+
+TEST(MaxFecFrameSizeTests, FillsFourFecBlocksOfDataShards) {
+  // 212 data shards per FEC block at 20% FEC, 1008 bytes of frame per 1024-byte packet, minus the frame header
+  EXPECT_EQ(4 * 212 * 1008 - 8, stream::max_fec_frame_size(1024, 20));
+  EXPECT_EQ(4 * 212 * 1376 - 8, stream::max_fec_frame_size(1392, 20));
+  // 170 data shards per FEC block at 50% FEC
+  EXPECT_EQ(4 * 170 * 1008 - 8, stream::max_fec_frame_size(1024, 50));
+}
 
 TEST(ConcatAndInsertTests, ConcatNoInsertionTest) {
   char b1[] = {'a', 'b'};

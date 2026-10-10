@@ -1358,6 +1358,22 @@ namespace platf::dxgi {
     return true;
   }
 
+  platf::damage_rect_t display_rect_from_surface(const RECT &rect, DXGI_MODE_ROTATION rotation, int display_width, int display_height) {
+    const auto width = rect.right - rect.left;
+    const auto height = rect.bottom - rect.top;
+    // The inverse of the cursor viewport rotation in gpu_cursor_t::update_viewport()
+    switch (rotation) {
+      case DXGI_MODE_ROTATION_ROTATE90:
+        return {display_width - rect.bottom, rect.left, height, width};
+      case DXGI_MODE_ROTATION_ROTATE180:
+        return {display_width - rect.right, display_height - rect.bottom, width, height};
+      case DXGI_MODE_ROTATION_ROTATE270:
+        return {rect.top, display_height - rect.right, height, width};
+      default:
+        return {rect.left, rect.top, width, height};
+    }
+  }
+
   capture_e display_ddup_vram_t::snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) {
     HRESULT status;
     DXGI_OUTDUPL_FRAME_INFO frame_info;
@@ -1414,6 +1430,7 @@ namespace platf::dxgi {
     const bool blend_mouse_cursor_flag = (cursor_alpha.visible || cursor_xor.visible) && cursor_visible;
 
     texture2d_t src {};
+    std::optional<std::vector<platf::damage_rect_t>> desktop_changes {std::in_place};
     if (frame_update_flag) {
       // Get the texture object from this frame
       status = res->QueryInterface(IID_ID3D11Texture2D, (void **) &src);
@@ -1444,6 +1461,14 @@ namespace platf::dxgi {
         BOOST_LOG(info) << "Capture format changed ["sv << dxgi_format_to_string(capture_format) << " -> "sv << dxgi_format_to_string(desc.Format) << ']';
         return capture_e::reinit;
       }
+
+      if (auto rects = dup.changed_rects(frame_info)) {
+        for (const auto &rect : *rects) {
+          desktop_changes->push_back(display_rect_from_surface(rect, display_rotation, width, height));
+        }
+      } else {
+        desktop_changes.reset();
+      }
     }
 
     enum class lfa {
@@ -1462,6 +1487,8 @@ namespace platf::dxgi {
 
     auto last_frame_action = lfa::nothing;
     auto out_frame_action = ofa::dummy_fallback;
+    // Every Desktop Duplication frame becomes an image, so its changes are since the last image unless that was a dummy
+    const bool follows_desktop_frame = !std::holds_alternative<std::monostate>(last_frame_variant);
 
     if (capture_format == DXGI_FORMAT_UNKNOWN) {
       // We don't know the final capture format yet, so we will encode a black dummy image
@@ -1759,7 +1786,29 @@ namespace platf::dxgi {
       old_surface_delayed_destruction.reset();
     }
 
+    // Both cursor parts share the position, and the size when both are present
+    const auto &cursor = cursor_alpha.texture.get() ? cursor_alpha : cursor_xor;
+    std::optional<platf::damage_rect_t> blended_cursor;
+    if (blend_mouse_cursor_flag && cursor.texture.get()) {
+      blended_cursor = platf::damage_rect_t {cursor.topleft_x, cursor.topleft_y, cursor.texture_width, cursor.texture_height};
+    }
+    if (desktop_changes && follows_desktop_frame && out_frame_action != ofa::dummy_fallback) {
+      for (const auto &rect : {last_blended_cursor, blended_cursor}) {
+        if (rect) {
+          desktop_changes->push_back(*rect);
+        }
+      }
+    } else {
+      desktop_changes.reset();
+    }
+    last_blended_cursor = blended_cursor;
+
     if (img_out) {
+      // Forwarding the last image unchanged delivers it again, while encoders may still read its damage
+      if (out_frame_action != ofa::forward_last_img || last_frame_action != lfa::nothing) {
+        img_out->capture_sequence = ++capture_sequence;
+        img_out->damage = std::move(desktop_changes);
+      }
       img_out->frame_timestamp = frame_timestamp;
     }
 

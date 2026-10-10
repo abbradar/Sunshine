@@ -341,6 +341,32 @@ INSTANTIATE_TEST_SUITE_P(
   )
 );
 
+struct LosslessRefinementApplicableTest: testing::TestWithParam<std::tuple<int, int, int, int, bool>> {};
+
+TEST_P(LosslessRefinementApplicableTest, Run) {
+  const auto &[video_format, dynamic_range, chroma_sampling_type, intra_refresh, expected] = GetParam();
+  video::config_t config {};
+  config.videoFormat = video_format;
+  config.dynamicRange = dynamic_range;
+  config.chromaSamplingType = chroma_sampling_type;
+  config.enableIntraRefresh = intra_refresh;
+  EXPECT_EQ(expected, video::lossless_refinement_applicable(config));
+}
+
+INSTANTIATE_TEST_SUITE_P(
+  LosslessRefinementApplicableTests,
+  LosslessRefinementApplicableTest,
+  testing::Values(
+    // video format, dynamic range, chroma sampling, intra refresh
+    std::make_tuple(0, 0, 1, 0, true),  // H.264 4:4:4
+    std::make_tuple(0, 0, 0, 0, false),  // H.264 4:2:0
+    std::make_tuple(1, 0, 0, 0, true),  // HEVC
+    std::make_tuple(2, 0, 1, 0, false),  // AV1
+    std::make_tuple(1, 1, 0, 0, false),  // 10-bit
+    std::make_tuple(1, 0, 0, 1, false)  // intra refresh
+  )
+);
+
 /**
  * @brief Software encoder converts BGR0 and NV12 frames, including padded strides and
  *        backends that don't report the pixel pitch.

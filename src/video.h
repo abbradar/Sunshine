@@ -39,6 +39,7 @@ namespace video {
     int dynamicRange;  ///< Encoding color depth: 0 = 8-bit, 1 = 10-bit.
     int chromaSamplingType;  ///< Chroma sampling type: 0 = 4:2:0, 1 = 4:4:4.
     int enableIntraRefresh;  ///< Intra refresh setting: 0 = disabled, 1 = enabled.
+    int maxFecFrameSize;  ///< Largest encoded frame in bytes the stream protects with FEC, zero when unknown.
   };
 
   namespace amf {
@@ -419,6 +420,15 @@ namespace video {
   };
 
   /**
+   * @brief Outcome of a request to invalidate reference frames.
+   */
+  enum class ref_frames_invalidation_e {
+    invalidated,  ///< The frames were invalidated.
+    already_invalidated,  ///< An earlier request already covered the frames.
+    idr,  ///< The frames couldn't be invalidated, so the next frame is an IDR frame.
+  };
+
+  /**
    * @brief Encoder session state shared by capture and encoding threads.
    */
   struct encode_session_t {
@@ -447,8 +457,18 @@ namespace video {
      *
      * @param first_frame First frame.
      * @param last_frame Last frame.
+     * @return Whether the frames were invalidated, or the next frame is an IDR frame instead.
      */
-    virtual void invalidate_ref_frames(int64_t first_frame, int64_t last_frame) = 0;
+    virtual ref_frames_invalidation_e invalidate_ref_frames(int64_t first_frame, int64_t last_frame) = 0;
+
+    /**
+     * @brief Get the size of the blocks the encoder can encode losslessly.
+     *
+     * @return Block size in pixels, zero when the session doesn't support lossless refinement.
+     */
+    virtual std::uint32_t lossless_block_size() const {
+      return 0;
+    }
   };
 
   // encoders
@@ -777,5 +797,20 @@ namespace video {
   inline std::chrono::nanoseconds capture_frame_interval(const config_t &config) {
     const AVRational fps = framerate_to_rational(config);
     return std::chrono::nanoseconds {(static_cast<int64_t>(fps.den) * 1'000'000'000LL) / fps.num};
+  }
+
+  /**
+   * @brief Check whether a stream's format allows lossless refinement.
+   * H.264 has lossless blocks only in the High 4:4:4 Predictive profile, band sizing assumes 8-bit,
+   * and intra refresh would re-encode refined content lossy.
+   *
+   * @param config Stream configuration requested by the client.
+   * @return `true` when the encoder may refine the stream.
+   */
+  inline bool lossless_refinement_applicable(const config_t &config) {
+    if (config.dynamicRange != 0 || config.enableIntraRefresh == 1) {
+      return false;
+    }
+    return (config.videoFormat == 0 && config.chromaSamplingType == 1) || config.videoFormat == 1;
   }
 }  // namespace video

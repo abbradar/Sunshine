@@ -9,6 +9,7 @@
   #include <bit>
   #include <cstdint>
   #include <memory>
+  #include <span>
   #include <string_view>
   #include <utility>
 
@@ -17,6 +18,7 @@
 
   // local includes
   #include "src/nvenc/nvenc_dynamic_factory.h"
+  #include "src/video.h"
 
 namespace {
 
@@ -51,12 +53,16 @@ namespace {
     void destroy_encoder() override {
     }
 
-    nvenc::nvenc_encoded_frame encode_frame(std::uint64_t frame_index, bool force_idr) override {
+    nvenc::nvenc_encoded_frame encode_frame(std::uint64_t frame_index, bool force_idr, std::span<const video::lossless_block_rect_t>) override {
       return {{}, frame_index, force_idr, false};
     }
 
-    bool invalidate_ref_frames(std::uint64_t, std::uint64_t) override {
-      return true;
+    std::uint32_t lossless_block_size() const override {
+      return 0;
+    }
+
+    video::ref_frames_invalidation_e invalidate_ref_frames(std::uint64_t, std::uint64_t) override {
+      return video::ref_frames_invalidation_e::invalidated;
     }
 
     ID3D11Texture2D *get_input_texture() override {

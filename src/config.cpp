@@ -797,7 +797,8 @@ namespace config {
     },  // display_device
 
     0,  // max_bitrate
-    0  // minimum_fps_target (0 = framerate)
+    0,  // minimum_fps_target (0 = framerate)
+    100  // lossless_refinement_delay_ms
   };
 
   /**
@@ -1623,6 +1624,8 @@ namespace config {
     generic_f(vars, "nvenc_twopass", video.nv.two_pass, nv::twopass_from_view);
     bool_f(vars, "nvenc_h264_cavlc", video.nv.h264_cavlc);
     generic_f(vars, "nvenc_split_encode", video.nv.split_frame_encoding, nv::split_encode_from_view);
+    bool_f(vars, "nvenc_lossless_refinement", video.nv.lossless_refinement);
+    int_between_f(vars, "nvenc_lossless_refinement_delay", video.lossless_refinement_delay_ms, {0, 10000});
     bool_f(vars, "nvenc_realtime_hags", video.nv_realtime_hags);
     bool_f(vars, "nvenc_opengl_vulkan_on_dxgi", video.nv_opengl_vulkan_on_dxgi);
     bool_f(vars, "nvenc_latency_over_power", video.nv_sunshine_high_power_mode);

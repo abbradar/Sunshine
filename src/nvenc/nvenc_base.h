@@ -4,6 +4,11 @@
  */
 #pragma once
 
+// standard includes
+#include <cstdint>
+#include <span>
+#include <vector>
+
 // local includes
 #include "nvenc_colorspace.h"
 #include "nvenc_config.h"
@@ -62,18 +67,24 @@ namespace NVENC_NAMESPACE {
      *        Afterwards serves as parameter for `invalidate_ref_frames()`.
      *        No restrictions on the first frame index, but later frame indexes must be subsequent.
      * @param force_idr Whether to encode frame as forced IDR.
+     * @param lossless_blocks Rectangles of blocks of `lossless_block_size()` pixels to encode losslessly.
      * @return Encoded frame.
      */
-    ::nvenc::nvenc_encoded_frame encode_frame(uint64_t frame_index, bool force_idr) override;
+    ::nvenc::nvenc_encoded_frame encode_frame(uint64_t frame_index, bool force_idr, std::span<const video::lossless_block_rect_t> lossless_blocks) override;
+
+    /**
+     * @brief Get the size of the blocks the encoder can encode losslessly.
+     * @return Block size in pixels, or zero when lossless refinement is disabled or unsupported.
+     */
+    std::uint32_t lossless_block_size() const override;
 
     /**
      * @brief Perform reference frame invalidation (RFI) procedure.
      * @param first_frame First frame index of the invalidation range.
      * @param last_frame Last frame index of the invalidation range.
-     * @return `true` on success, `false` on error.
-     *         After error next frame must be encoded with `force_idr = true`.
+     * @return Whether the frames were invalidated, or the next frame has to be encoded with `force_idr = true`.
      */
-    bool invalidate_ref_frames(uint64_t first_frame, uint64_t last_frame) override;
+    video::ref_frames_invalidation_e invalidate_ref_frames(uint64_t first_frame, uint64_t last_frame) override;
 
   protected:
     /**
@@ -128,6 +139,7 @@ namespace NVENC_NAMESPACE {
       NV_ENC_BUFFER_FORMAT buffer_format = NV_ENC_BUFFER_FORMAT_UNDEFINED;
       uint32_t ref_frames_in_dpb = 0;
       bool rfi = false;
+      uint32_t lossless_block_size = 0;
     } encoder_params;  ///< Current encoder dimensions, pixel format, and reference-frame settings.
 
     std::string last_nvenc_error_string;  ///< Last NVENC error string.
@@ -304,6 +316,61 @@ namespace NVENC_NAMESPACE {
     );
 
     /**
+     * @brief Configure lossless refinement with a QP delta map if the gpu supports lossless encode.
+     *
+     * @param init_params Encoder initialization parameters to update.
+     * @param enc_config H.264 or HEVC encoder configuration to update.
+     */
+    void configure_lossless_refinement(NV_ENC_INITIALIZE_PARAMS &init_params, NV_ENC_CONFIG &enc_config);
+
+    /**
+     * @brief Make an initialized HEVC session code blocks with QP 0 losslessly.
+     *
+     * NVENC enables transquant bypass only with lossless tuning, which doesn't allow CBR. Reconfiguring to lossless
+     * tuning and back before the first frame keeps it enabled. This is undocumented, so check the PPS afterwards.
+     *
+     * @param init_params Initialization parameters of the session.
+     * @param enc_config Encoder configuration of the session.
+     * @return `true` on success, `false` on error.
+     */
+    bool enable_hevc_transquant_bypass(const NV_ENC_INITIALIZE_PARAMS &init_params, NV_ENC_CONFIG &enc_config);
+
+    /**
+     * @brief Check that the parameter sets of an initialized session code blocks with QP 0 losslessly.
+     *
+     * @param encode_guid Codec of the session.
+     * @return `true` when lossless coding is enabled, otherwise `false`.
+     */
+    bool lossless_coding_enabled(const GUID &encode_guid);
+
+    /**
+     * @brief Result of creating an encoder session.
+     */
+    enum class session_status_e {
+      created,  ///< The session is ready.
+      failed,  ///< Creating the session failed.
+      lossless_failed,  ///< Creating the session failed after configuring lossless refinement, it may work without.
+    };
+
+    /**
+     * @brief Create the encoder session, optionally with lossless refinement.
+     *
+     * @param config NVENC encoder configuration.
+     * @param client_config Stream configuration requested by the client.
+     * @param sunshine_colorspace YUV colorspace.
+     * @param sunshine_buffer_format Platform-agnostic input surface format.
+     * @param lossless_refinement Whether to try configuring lossless refinement.
+     * @return Whether the session was created, or which kind of failure occurred.
+     */
+    session_status_e create_encoder_session(
+      const ::nvenc::nvenc_config &config,
+      const video::config_t &client_config,
+      const video::sunshine_colorspace_t &sunshine_colorspace,
+      platf::pix_fmt_e sunshine_buffer_format,
+      bool lossless_refinement
+    );
+
+    /**
      * @brief Initialize the encoder and its registered input and output resources.
      *
      * @param init_params Completed encoder initialization parameters.
@@ -329,6 +396,8 @@ namespace NVENC_NAMESPACE {
     ) const;
 
     NV_ENC_OUTPUT_PTR output_bitstream = nullptr;
+
+    std::vector<std::int8_t> qp_delta_map;
 
     struct {
       uint64_t last_encoded_frame_index = 0;

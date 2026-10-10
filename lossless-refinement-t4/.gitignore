@@ -1,0 +1,4 @@
+obj/
+pkg/
+/harness
+harness.tar.gz

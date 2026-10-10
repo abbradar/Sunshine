@@ -523,6 +523,23 @@ namespace platf {
   };
 
   /**
+   * @brief Area of a captured image that changed, in display coordinates.
+   */
+  struct damage_rect_t {
+    std::int32_t x;  ///< Left edge.
+    std::int32_t y;  ///< Top edge.
+    std::int32_t width;  ///< Width.
+    std::int32_t height;  ///< Height.
+
+    /**
+     * @brief Compare two rectangles.
+     *
+     * @return `true` when both cover the same area.
+     */
+    bool operator==(const damage_rect_t &) const = default;
+  };
+
+  /**
    * @brief Captured frame buffer shared between capture and encode stages.
    */
   struct img_t: std::enable_shared_from_this<img_t> {
@@ -541,6 +558,17 @@ namespace platf {
     std::int32_t row_pitch {};  ///< Bytes between consecutive image rows.
 
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp;  ///< Capture timestamp associated with the frame.
+    std::uint64_t capture_sequence {};  ///< Number of the capture that filled the image, zero when unknown.
+    std::optional<std::vector<damage_rect_t>> damage;  ///< Areas changed since the previous capture, `std::nullopt` when unknown.
+
+    /**
+     * @brief Clear the capture metadata before capturing into the image again.
+     */
+    void reset_capture_info() {
+      frame_timestamp.reset();
+      capture_sequence = 0;
+      damage.reset();
+    }
 
     /**
      * @brief Destroy the image.
