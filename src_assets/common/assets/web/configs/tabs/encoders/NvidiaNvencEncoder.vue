@@ -69,6 +69,23 @@ const config = ref(props.config)
       </div>
     </div>
 
+    <!-- Lossless refinement of static content -->
+    <Checkbox v-if="platform === 'windows'"
+              class="mb-3"
+              id="nvenc_lossless_refinement"
+              locale-prefix="config"
+              v-model="config.nvenc_lossless_refinement"
+              default="false"
+    ></Checkbox>
+
+    <!-- Lossless refinement delay -->
+    <div class="mb-3" v-if="platform === 'windows'">
+      <label for="nvenc_lossless_refinement_delay" class="form-label">{{ $t('config.nvenc_lossless_refinement_delay') }}</label>
+      <input type="number" min="0" max="10000" class="form-control" id="nvenc_lossless_refinement_delay" placeholder="100"
+             v-model="config.nvenc_lossless_refinement_delay" />
+      <div class="form-text">{{ $t('config.nvenc_lossless_refinement_delay_desc') }}</div>
+    </div>
+
     <!-- Miscellaneous options -->
     <div class="mb-3 accordion">
       <div class="accordion-item">
