@@ -63,6 +63,9 @@ namespace nvenc {
 
     // Enable split-frame encoding if the gpu has multiple NVENC hardware clusters
     nvenc_split_frame_encoding split_frame_encoding = nvenc_split_frame_encoding::driver_decides;  ///< Split frame encoding.
+
+    // Re-encode static content losslessly, requires 8-bit H.264 YUV 4:4:4 or 8-bit HEVC streams
+    bool lossless_refinement = false;  ///< Enable lossless refinement of static content.
   };
 
 }  // namespace nvenc
