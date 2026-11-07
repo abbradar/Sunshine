@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -565,4 +566,70 @@ TEST(SoftwareEncoderConversion, Bgr0AndNv12) {
   fallback_nv12_img.height = h;
   fallback_nv12_img.row_pitch = w;
   EXPECT_EQ(device.convert(fallback_nv12_img), 0);
+}
+
+namespace {
+  /**
+   * @brief Display that never captures, for tests that only need distinct displays.
+   */
+  class fake_display_t: public platf::display_t {
+  public:
+    /**
+     * @brief Fail to capture.
+     *
+     * @return Always `platf::capture_e::error`.
+     */
+    platf::capture_e capture(const push_captured_image_cb_t &, const pull_free_image_cb_t &, bool *) override {
+      return platf::capture_e::error;
+    }
+
+    /**
+     * @brief Allocate an empty image.
+     *
+     * @return New image.
+     */
+    std::shared_ptr<platf::img_t> alloc_img() override {
+      return std::make_shared<platf::img_t>();
+    }
+
+    /**
+     * @brief Leave the image as it is.
+     *
+     * @return Always 0.
+     */
+    int dummy_img(platf::img_t *) override {
+      return 0;
+    }
+  };
+}  // namespace
+
+TEST(LastImageTest, ReturnsImageForTheDisplayThatCapturedIt) {
+  const auto display = std::make_shared<fake_display_t>();
+  const auto image = display->alloc_img();
+  const video::last_image_t last_image {display, image};
+
+  EXPECT_EQ(last_image.for_display(display), image);
+}
+
+TEST(LastImageTest, ReturnsNothingForAnotherDisplay) {
+  const auto display = std::make_shared<fake_display_t>();
+  const video::last_image_t last_image {display, display->alloc_img()};
+
+  EXPECT_EQ(last_image.for_display(std::make_shared<fake_display_t>()), nullptr);
+  EXPECT_EQ(last_image.for_display(nullptr), nullptr);
+}
+
+TEST(LastImageTest, ReturnsNothingAfterTheDisplayIsDestroyed) {
+  auto display = std::make_shared<fake_display_t>();
+  const video::last_image_t last_image {display, display->alloc_img()};
+  display.reset();
+
+  EXPECT_EQ(last_image.for_display(std::make_shared<fake_display_t>()), nullptr);
+}
+
+TEST(LastImageTest, ReturnsNothingWithoutImage) {
+  const auto display = std::make_shared<fake_display_t>();
+
+  EXPECT_EQ(video::last_image_t {}.for_display(display), nullptr);
+  EXPECT_EQ((video::last_image_t {display, nullptr}).for_display(display), nullptr);
 }

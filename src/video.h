@@ -6,6 +6,7 @@
 
 // standard includes
 #include <chrono>
+#include <memory>
 #include <string_view>
 
 // local includes
@@ -123,6 +124,22 @@ namespace video {
    * @brief Shared event that transports captured images between capture and encode threads.
    */
   using img_event_t = std::shared_ptr<safe::event_t<std::shared_ptr<platf::img_t>>>;
+
+  /**
+   * @brief Last captured image an encode session converted, kept for the next session on the same display.
+   */
+  struct last_image_t {
+    std::weak_ptr<platf::display_t> display;  ///< Display that captured the image.
+    std::shared_ptr<platf::img_t> image;  ///< Captured image.
+
+    /**
+     * @brief Get the image if it was captured by the given display.
+     *
+     * @param disp Display the next encode session captures from.
+     * @return The image, or null if there is none or another display captured it.
+     */
+    std::shared_ptr<platf::img_t> for_display(const std::shared_ptr<platf::display_t> &disp) const;
+  };
 
   /**
    * @brief FFmpeg software encode device used when no hardware frames are required.
