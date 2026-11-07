@@ -502,6 +502,43 @@ namespace platf::dxgi {
       }
 
       auto &img = (img_d3d_t &) img_base;
+
+      auto draw = [&](auto &input, auto &y_or_yuv_viewports, auto &uv_viewport) {
+        device_ctx->PSSetShaderResources(0, 1, &input);
+
+        // Draw Y/YUV
+        device_ctx->OMSetRenderTargets(1, &out_Y_or_YUV_rtv, nullptr);
+        device_ctx->VSSetShader(convert_Y_or_YUV_vs.get(), nullptr, 0);
+        device_ctx->PSSetShader(img.format == DXGI_FORMAT_R16G16B16A16_FLOAT ? convert_Y_or_YUV_fp16_ps.get() : convert_Y_or_YUV_ps.get(), nullptr, 0);
+        auto viewport_count = (format == DXGI_FORMAT_R16_UINT) ? 3 : 1;
+        assert(viewport_count <= y_or_yuv_viewports.size());
+        device_ctx->RSSetViewports(viewport_count, y_or_yuv_viewports.data());
+        device_ctx->Draw(3 * viewport_count, 0);  // vertex shader will spread vertices across viewports
+
+        // Draw UV if needed
+        if (out_UV_rtv) {
+          assert(format == DXGI_FORMAT_NV12 || format == DXGI_FORMAT_P010);
+          device_ctx->OMSetRenderTargets(1, &out_UV_rtv, nullptr);
+          device_ctx->VSSetShader(convert_UV_vs.get(), nullptr, 0);
+          device_ctx->PSSetShader(img.format == DXGI_FORMAT_R16G16B16A16_FLOAT ? convert_UV_fp16_ps.get() : convert_UV_ps.get(), nullptr, 0);
+          device_ctx->RSSetViewports(1, &uv_viewport);
+          device_ctx->Draw(3, 0);
+        }
+
+        ID3D11ShaderResourceView *emptyShaderResourceView = nullptr;
+        device_ctx->PSSetShaderResources(0, 1, &emptyShaderResourceView);
+      };
+
+      // Clear render target view(s) once so that the aspect ratio mismatch "bars" appear black,
+      // also for blank images, which would otherwise leave the uninitialized output to the encoder
+      if (!rtvs_cleared) {
+        auto black = create_black_texture_for_rtv_clear();
+        if (black) {
+          draw(black, out_Y_or_YUV_viewports_for_clear, out_UV_viewport_for_clear);
+        }
+        rtvs_cleared = true;
+      }
+
       if (!img.blank) {
         auto &img_ctx = img_ctx_map[img.id];
 
@@ -517,46 +554,11 @@ namespace platf::dxgi {
           return -1;
         }
 
-        auto draw = [&](auto &input, auto &y_or_yuv_viewports, auto &uv_viewport) {
-          device_ctx->PSSetShaderResources(0, 1, &input);
-
-          // Draw Y/YUV
-          device_ctx->OMSetRenderTargets(1, &out_Y_or_YUV_rtv, nullptr);
-          device_ctx->VSSetShader(convert_Y_or_YUV_vs.get(), nullptr, 0);
-          device_ctx->PSSetShader(img.format == DXGI_FORMAT_R16G16B16A16_FLOAT ? convert_Y_or_YUV_fp16_ps.get() : convert_Y_or_YUV_ps.get(), nullptr, 0);
-          auto viewport_count = (format == DXGI_FORMAT_R16_UINT) ? 3 : 1;
-          assert(viewport_count <= y_or_yuv_viewports.size());
-          device_ctx->RSSetViewports(viewport_count, y_or_yuv_viewports.data());
-          device_ctx->Draw(3 * viewport_count, 0);  // vertex shader will spread vertices across viewports
-
-          // Draw UV if needed
-          if (out_UV_rtv) {
-            assert(format == DXGI_FORMAT_NV12 || format == DXGI_FORMAT_P010);
-            device_ctx->OMSetRenderTargets(1, &out_UV_rtv, nullptr);
-            device_ctx->VSSetShader(convert_UV_vs.get(), nullptr, 0);
-            device_ctx->PSSetShader(img.format == DXGI_FORMAT_R16G16B16A16_FLOAT ? convert_UV_fp16_ps.get() : convert_UV_ps.get(), nullptr, 0);
-            device_ctx->RSSetViewports(1, &uv_viewport);
-            device_ctx->Draw(3, 0);
-          }
-        };
-
-        // Clear render target view(s) once so that the aspect ratio mismatch "bars" appear black
-        if (!rtvs_cleared) {
-          auto black = create_black_texture_for_rtv_clear();
-          if (black) {
-            draw(black, out_Y_or_YUV_viewports_for_clear, out_UV_viewport_for_clear);
-          }
-          rtvs_cleared = true;
-        }
-
         // Draw captured frame
         draw(img_ctx.encoder_input_res, out_Y_or_YUV_viewports, out_UV_viewport);
 
         // Release encoder mutex to allow capture code to reuse this image
         img_ctx.encoder_mutex->ReleaseSync(0);
-
-        ID3D11ShaderResourceView *emptyShaderResourceView = nullptr;
-        device_ctx->PSSetShaderResources(0, 1, &emptyShaderResourceView);
       }
 
       return 0;
