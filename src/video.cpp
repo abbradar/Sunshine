@@ -2388,6 +2388,10 @@ namespace video {
     return nullptr;
   }
 
+  std::shared_ptr<platf::img_t> last_image_t::for_display(const std::shared_ptr<platf::display_t> &disp) const {
+    return image && disp && display.lock() == disp ? image : nullptr;
+  }
+
   /**
    * @brief Run one encode loop for a display capture stream.
    *
@@ -2400,6 +2404,7 @@ namespace video {
    * @param reinit_event Signal raised while the encoder/display is reinitializing.
    * @param encoder Selected encoder.
    * @param channel_data Stream session carried with each encoded packet.
+   * @param last_image Last image converted by this or the previous encode session, updated as frames are converted.
    */
   void encode_run(
     int &frame_nr,  // Store progress of the frame number
@@ -2410,7 +2415,8 @@ namespace video {
     std::unique_ptr<platf::encode_device_t> encode_device,
     safe::signal_t &reinit_event,
     const encoder_t &encoder,
-    stream::session_t *channel_data
+    stream::session_t *channel_data,
+    last_image_t &last_image
   ) {
     auto session = make_encode_session(disp.get(), encoder, config, disp->width, disp->height, std::move(encode_device));
     if (!session) {
@@ -2444,7 +2450,17 @@ namespace video {
     auto idr_events = mail->event<bool>(mail::idr);
     auto invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
 
-    {
+    // Start with the last image of the previous session on this display, so that the new
+    // session shows the current picture even if the display doesn't capture a new frame soon,
+    // as with a static desktop
+    auto initial_img = last_image.for_display(disp);
+    if (initial_img && session->convert(*initial_img)) {
+      BOOST_LOG(warning) << "Could not convert the last captured image, starting with a blank one"sv;
+      initial_img.reset();
+    }
+    if (!initial_img) {
+      last_image = {};
+
       // Load a dummy image into the AVFrame to ensure we have something to encode
       // even if we timeout waiting on the first frame. This is a relatively large
       // allocation which can be freed immediately after convert(), so we do this
@@ -2483,6 +2499,7 @@ namespace video {
             BOOST_LOG(error) << "Could not convert image"sv;
             return;
           }
+          last_image = {disp, img};
         } else if (!images->running()) {
           break;
         }
@@ -2897,6 +2914,7 @@ namespace video {
     }
 
     int frame_nr = 1;
+    last_image_t last_image;
 
     auto touch_port_event = mail->event<input::touch_port_t>(mail::touch_port);
     auto hdr_event = mail->event<hdr_info_t>(mail::hdr);
@@ -2951,7 +2969,8 @@ namespace video {
         std::move(encode_device),
         ref->reinit_event,
         *ref->encoder_p,
-        channel_data
+        channel_data,
+        last_image
       );
     }
   }
