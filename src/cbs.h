@@ -4,6 +4,10 @@
  */
 #pragma once
 
+// standard includes
+#include <cstdint>
+#include <span>
+
 // local includes
 #include "utility.h"
 
@@ -60,4 +64,20 @@ namespace cbs {
    * @return `true` when the packet's active SPS advertises VUI parameters.
    */
   bool validate_sps(const AVPacket *packet, int codec_id);
+
+  /**
+   * @brief Check whether H.264 parameter sets enable lossless coding of blocks with QP 0.
+   *
+   * @param parameter_sets Annex B byte stream with the SPS.
+   * @return `true` when the SPS sets `qpprime_y_zero_transform_bypass_flag`.
+   */
+  bool h264_transform_bypass_enabled(std::span<const std::uint8_t> parameter_sets);
+
+  /**
+   * @brief Check whether HEVC parameter sets enable lossless coding with transquant bypass.
+   *
+   * @param parameter_sets Annex B byte stream with the VPS, SPS and PPS.
+   * @return `true` when the PPS sets `transquant_bypass_enabled_flag`.
+   */
+  bool hevc_transquant_bypass_enabled(std::span<const std::uint8_t> parameter_sets);
 }  // namespace cbs
