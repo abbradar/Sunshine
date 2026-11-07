@@ -577,10 +577,10 @@ namespace {
     /**
      * @brief Fail to capture.
      *
-     * @return Always `platf::capture_e::error`.
+     * @return Always `platf::capture_e::capture_error`.
      */
     platf::capture_e capture(const push_captured_image_cb_t &, const pull_free_image_cb_t &, bool *) override {
-      return platf::capture_e::error;
+      return platf::capture_e::capture_error;
     }
 
     /**
