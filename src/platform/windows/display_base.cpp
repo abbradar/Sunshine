@@ -44,6 +44,7 @@ enum _D3DKMT_GPU_PREFERENCE_QUERY_STATE : DWORD {
 using D3DKMT_GPU_PREFERENCE_QUERY_STATE = _D3DKMT_GPU_PREFERENCE_QUERY_STATE;  ///< GPU preference query state reported by D3DKMT.
 
 #include "display.h"
+#include "dxgi_enumeration.h"
 #include "misc.h"
 #include "src/config.h"
 #include "src/display_device.h"
@@ -501,29 +502,21 @@ namespace platf::dxgi {
     auto adapter_name = utf_utils::from_utf8(config::video.adapter_name);
     auto output_name = utf_utils::from_utf8(display_name);
 
-    adapter_t::pointer adapter_p;
     for (int tries = 0; tries < 2; ++tries) {
-      int x = 0;
-      while (SUCCEEDED(status = factory->EnumAdapters1(x++, &adapter_p))) {
-        dxgi::adapter_t adapter_tmp {adapter_p};
-
+      status = for_each_adapter<adapter_t>(factory.get(), [&](adapter_t &adapter_tmp) {
         DXGI_ADAPTER_DESC1 adapter_desc;
         adapter_tmp->GetDesc1(&adapter_desc);
 
         if (!adapter_name.empty() && adapter_desc.Description != adapter_name) {
-          continue;
+          return true;
         }
 
-        dxgi::output_t::pointer output_p;
-        int y = 0;
-        while (SUCCEEDED(status = adapter_tmp->EnumOutputs(y++, &output_p))) {
-          dxgi::output_t output_tmp {output_p};
-
+        const HRESULT outputs_status = for_each_output<output_t>(adapter_tmp.get(), [&](output_t &output_tmp) {
           DXGI_OUTPUT_DESC desc;
           output_tmp->GetDesc(&desc);
 
           if (!output_name.empty() && desc.DeviceName != output_name) {
-            continue;
+            return true;
           }
 
           if (desc.AttachedToDesktop && test_dxgi_duplication(adapter_tmp, output_tmp, false)) {
@@ -548,19 +541,23 @@ namespace platf::dxgi {
             offset_x -= GetSystemMetrics(SM_XVIRTUALSCREEN);
             offset_y -= GetSystemMetrics(SM_YVIRTUALSCREEN);
 
-            break;
+            return false;
           }
-        }
-        if (FAILED(status) && status != DXGI_ERROR_NOT_FOUND) {
-          BOOST_LOG(error) << "Failed to enumerate DXGI outputs [0x"sv << util::hex(status).to_string_view() << ']';
+
+          return true;
+        });
+        if (FAILED(outputs_status)) {
+          BOOST_LOG(error) << "Failed to enumerate DXGI outputs [0x"sv << util::hex(outputs_status).to_string_view() << ']';
         }
 
         if (output) {
           adapter = std::move(adapter_tmp);
-          break;
+          return false;
         }
-      }
-      if (FAILED(status) && status != DXGI_ERROR_NOT_FOUND) {
+
+        return true;
+      });
+      if (FAILED(status)) {
         BOOST_LOG(error) << "Failed to enumerate DXGI adapters [0x"sv << util::hex(status).to_string_view() << ']';
       }
 
@@ -590,6 +587,7 @@ namespace platf::dxgi {
       D3D_FEATURE_LEVEL_9_1
     };
 
+    IDXGIAdapter *adapter_p;
     status = adapter->QueryInterface(IID_IDXGIAdapter, (void **) &adapter_p);
     if (FAILED(status)) {
       BOOST_LOG(error) << "Failed to query IDXGIAdapter interface"sv;
@@ -1071,31 +1069,11 @@ namespace platf {
     return nullptr;
   }
 
-  std::vector<std::string> display_names(mem_type_e) {
+  std::vector<std::string> dxgi::enum_display_names(IDXGIFactory1 *factory, const output_probe_t &can_capture) {
     std::vector<std::string> display_names;
 
-    HRESULT status;
-
-    BOOST_LOG(debug) << "Detecting monitors..."sv;
-
-    // We sync the thread desktop once before we start the enumeration process
-    // to ensure test_dxgi_duplication() returns consistent results for all GPUs
-    // even if the current desktop changes during our enumeration process.
-    // It is critical that we either fully succeed in enumeration or fully fail,
-    // otherwise it can lead to the capture code switching monitors unexpectedly.
-    syncThreadDesktop();
-
-    dxgi::factory1_t factory;
-    status = CreateDXGIFactory1(IID_IDXGIFactory1, (void **) &factory);
-    if (FAILED(status)) {
-      BOOST_LOG(error) << "Failed to create DXGIFactory1 [0x"sv << util::hex(status).to_string_view() << ']';
-      return {};
-    }
-
-    dxgi::adapter_t::pointer adapter_p;
-    int x = 0;
-    while (SUCCEEDED(status = factory->EnumAdapters1(x++, &adapter_p))) {
-      dxgi::adapter_t adapter {adapter_p};
+    HRESULT outputs_status = S_OK;
+    const HRESULT status = for_each_adapter<adapter_t>(factory, [&](adapter_t &adapter) {
       DXGI_ADAPTER_DESC1 adapter_desc;
       adapter->GetDesc1(&adapter_desc);
 
@@ -1111,11 +1089,7 @@ namespace platf {
         << std::endl
         << "    ====== OUTPUT ======"sv << std::endl;
 
-      dxgi::output_t::pointer output_p {};
-      int y = 0;
-      while (SUCCEEDED(status = adapter->EnumOutputs(y++, &output_p))) {
-        dxgi::output_t output {output_p};
-
+      outputs_status = for_each_output<output_t>(adapter.get(), [&](output_t &output) {
         DXGI_OUTPUT_DESC desc;
         output->GetDesc(&desc);
 
@@ -1131,19 +1105,49 @@ namespace platf {
           << std::endl;
 
         // Don't include the display in the list if we can't actually capture it
-        if (desc.AttachedToDesktop && dxgi::test_dxgi_duplication(adapter, output, true)) {
+        if (desc.AttachedToDesktop && can_capture(adapter, output)) {
           display_names.emplace_back(std::move(device_name));
         }
-      }
-      if (FAILED(status) && status != DXGI_ERROR_NOT_FOUND) {
-        BOOST_LOG(error) << "Failed to enumerate DXGI outputs [0x"sv << util::hex(status).to_string_view() << ']';
-      }
+
+        return true;
+      });
+
+      return SUCCEEDED(outputs_status);
+    });
+
+    // A partial list would make the caller switch away from displays it didn't see
+    if (FAILED(outputs_status)) {
+      BOOST_LOG(error) << "Failed to enumerate DXGI outputs [0x"sv << util::hex(outputs_status).to_string_view() << ']';
+      return {};
     }
-    if (FAILED(status) && status != DXGI_ERROR_NOT_FOUND) {
+    if (FAILED(status)) {
       BOOST_LOG(error) << "Failed to enumerate DXGI adapters [0x"sv << util::hex(status).to_string_view() << ']';
+      return {};
     }
 
     return display_names;
+  }
+
+  std::vector<std::string> display_names(mem_type_e) {
+    BOOST_LOG(debug) << "Detecting monitors..."sv;
+
+    // We sync the thread desktop once before we start the enumeration process
+    // to ensure test_dxgi_duplication() returns consistent results for all GPUs
+    // even if the current desktop changes during our enumeration process.
+    // It is critical that we either fully succeed in enumeration or fully fail,
+    // otherwise it can lead to the capture code switching monitors unexpectedly.
+    syncThreadDesktop();
+
+    dxgi::factory1_t factory;
+    const HRESULT status = CreateDXGIFactory1(IID_IDXGIFactory1, (void **) &factory);
+    if (FAILED(status)) {
+      BOOST_LOG(error) << "Failed to create DXGIFactory1 [0x"sv << util::hex(status).to_string_view() << ']';
+      return {};
+    }
+
+    return dxgi::enum_display_names(factory.get(), [](dxgi::adapter_t &adapter, dxgi::output_t &output) {
+      return dxgi::test_dxgi_duplication(adapter, output, true);
+    });
   }
 
   /**

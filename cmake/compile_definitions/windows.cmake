@@ -72,6 +72,7 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_vram.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_ram.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_wgc.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/dxgi_enumeration.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/audio.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/utf_utils.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/utf_utils.h"

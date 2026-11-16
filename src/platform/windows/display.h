@@ -4,6 +4,11 @@
  */
 #pragma once
 
+// standard includes
+#include <functional>
+#include <string>
+#include <vector>
+
 // platform includes
 #include <d3d11.h>
 #include <d3d11_4.h>
@@ -858,4 +863,21 @@ namespace platf::dxgi {
      */
     capture_e release_snapshot() override;
   };
+
+  /**
+   * @brief Check whether Desktop Duplication can capture an output of an adapter.
+   */
+  using output_probe_t = std::function<bool(adapter_t &adapter, output_t &output)>;
+
+  /**
+   * @brief List the displays that can be captured.
+   *
+   * The list is empty if any adapter or output can't be enumerated, since a partial list would make the caller
+   * switch away from the displays it misses.
+   *
+   * @param factory Factory whose adapters and outputs to enumerate.
+   * @param can_capture Checks whether an output attached to the desktop can be captured.
+   * @return Device names of the capturable outputs.
+   */
+  std::vector<std::string> enum_display_names(IDXGIFactory1 *factory, const output_probe_t &can_capture);
 }  // namespace platf::dxgi

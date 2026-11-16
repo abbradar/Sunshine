@@ -3,6 +3,7 @@
  * @brief Displays information about connected displays and GPUs
  */
 #define WINVER 0x0A00
+#include "src/platform/windows/dxgi_enumeration.h"
 #include "src/platform/windows/utf_utils.h"
 #include "src/utility.h"
 
@@ -36,11 +37,7 @@ int main(int argc, char *argv[]) {
     return -1;
   }
 
-  dxgi::adapter_t::pointer adapter_p {};
-  int x = 0;
-  while (SUCCEEDED(status = factory->EnumAdapters1(x++, &adapter_p))) {
-    dxgi::adapter_t adapter {adapter_p};
-
+  status = platf::dxgi::for_each_adapter<dxgi::adapter_t>(factory.get(), [](dxgi::adapter_t &adapter) {
     DXGI_ADAPTER_DESC1 adapter_desc;
     adapter->GetDesc1(&adapter_desc);
 
@@ -52,18 +49,14 @@ int main(int argc, char *argv[]) {
     std::cout << "Device Sys Mem    : " << std::format("{} MiB", adapter_desc.DedicatedSystemMemory / 1048576) << std::endl;
     std::cout << "Share Sys Mem     : " << std::format("{} MiB", adapter_desc.SharedSystemMemory / 1048576) << std::endl;
 
-    dxgi::output_t::pointer output_p {};
     bool has_outputs = false;
-    int y = 0;
-    while (SUCCEEDED(status = adapter->EnumOutputs(y++, &output_p))) {
+    const HRESULT outputs_status = platf::dxgi::for_each_output<dxgi::output_t>(adapter.get(), [&has_outputs](dxgi::output_t &output) {
       // Print the header only when we find the first output
       if (!has_outputs) {
         std::cout << std::endl
                   << "    ====== OUTPUT ======" << std::endl;
         has_outputs = true;
       }
-
-      dxgi::output_t output {output_p};
 
       DXGI_OUTPUT_DESC desc;
       output->GetDesc(&desc);
@@ -74,14 +67,17 @@ int main(int argc, char *argv[]) {
       std::cout << "    Output Name       : " << utf_utils::to_utf8(std::wstring(desc.DeviceName)) << std::endl;
       std::cout << "    AttachedToDesktop : " << (desc.AttachedToDesktop ? "yes" : "no") << std::endl;
       std::cout << "    Resolution        : " << std::format("{}x{}", width, height) << std::endl;
-    }
-    if (FAILED(status) && status != DXGI_ERROR_NOT_FOUND) {
-      std::cout << "Failed to enumerate DXGI outputs [0x"sv << util::hex(status).to_string_view() << ']' << std::endl;
+      return true;
+    });
+    if (FAILED(outputs_status)) {
+      std::cout << "Failed to enumerate DXGI outputs [0x"sv << util::hex(outputs_status).to_string_view() << ']' << std::endl;
     }
     std::cout << std::endl;
-  }
-  if (FAILED(status) && status != DXGI_ERROR_NOT_FOUND) {
+    return true;
+  });
+  if (FAILED(status)) {
     std::cout << "Failed to enumerate DXGI adapters [0x"sv << util::hex(status).to_string_view() << ']' << std::endl;
+    return -1;
   }
 
   return 0;
