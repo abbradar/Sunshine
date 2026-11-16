@@ -1063,26 +1063,8 @@ namespace platf {
     return nullptr;
   }
 
-  std::vector<std::string> display_names(mem_type_e) {
+  std::vector<std::string> dxgi::enum_display_names(IDXGIFactory1 *factory, const output_probe_t &can_capture) {
     std::vector<std::string> display_names;
-
-    HRESULT status;
-
-    BOOST_LOG(debug) << "Detecting monitors..."sv;
-
-    // We sync the thread desktop once before we start the enumeration process
-    // to ensure test_dxgi_duplication() returns consistent results for all GPUs
-    // even if the current desktop changes during our enumeration process.
-    // It is critical that we either fully succeed in enumeration or fully fail,
-    // otherwise it can lead to the capture code switching monitors unexpectedly.
-    syncThreadDesktop();
-
-    dxgi::factory1_t factory;
-    status = CreateDXGIFactory1(IID_IDXGIFactory1, (void **) &factory);
-    if (FAILED(status)) {
-      BOOST_LOG(error) << "Failed to create DXGIFactory1 [0x"sv << util::hex(status).to_string_view() << ']';
-      return {};
-    }
 
     const auto adapter_name = utf_utils::from_utf8(config::video.adapter_name);
 
@@ -1127,13 +1109,35 @@ namespace platf {
           << std::endl;
 
         // Don't include the display in the list if we can't actually capture it
-        if (desc.AttachedToDesktop && dxgi::test_dxgi_duplication(adapter, output, true)) {
+        if (desc.AttachedToDesktop && can_capture(adapter, output)) {
           display_names.emplace_back(std::move(device_name));
         }
       }
     }
 
     return display_names;
+  }
+
+  std::vector<std::string> display_names(mem_type_e) {
+    BOOST_LOG(debug) << "Detecting monitors..."sv;
+
+    // We sync the thread desktop once before we start the enumeration process
+    // to ensure test_dxgi_duplication() returns consistent results for all GPUs
+    // even if the current desktop changes during our enumeration process.
+    // It is critical that we either fully succeed in enumeration or fully fail,
+    // otherwise it can lead to the capture code switching monitors unexpectedly.
+    syncThreadDesktop();
+
+    dxgi::factory1_t factory;
+    const HRESULT status = CreateDXGIFactory1(IID_IDXGIFactory1, (void **) &factory);
+    if (FAILED(status)) {
+      BOOST_LOG(error) << "Failed to create DXGIFactory1 [0x"sv << util::hex(status).to_string_view() << ']';
+      return {};
+    }
+
+    return dxgi::enum_display_names(factory.get(), [](dxgi::adapter_t &adapter, dxgi::output_t &output) {
+      return dxgi::test_dxgi_duplication(adapter, output, true);
+    });
   }
 
   /**
