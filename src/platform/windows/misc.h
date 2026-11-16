@@ -32,9 +32,63 @@ namespace platf {
   using desktop_t = util::safe_ptr_v2<std::remove_pointer_t<HDESK>, BOOL, &CloseDesktop>;
 
   /**
-   * @brief Synchronize thread desktop.
+   * @brief Desktop the calling thread is attached to while the object lives.
    *
-   * @return true when the thread desktop was synchronized successfully.
+   * Windows can't close a desktop handle while a thread of the process uses it, so the attached desktop stays open
+   * until the thread moves to another one. Destroying the object returns the thread to the desktop it used when
+   * the object was created and closes the attached desktop. The object must be used and destroyed on one thread.
+   */
+  class thread_desktop_t {
+  public:
+    /**
+     * @brief Remember the current desktop of the calling thread.
+     */
+    thread_desktop_t();
+
+    /**
+     * @brief Return the thread to its original desktop and close the attached one.
+     *
+     * If the thread can't be returned, for example because it has created windows on the attached desktop, it
+     * stays there and the attached desktop is left open.
+     */
+    ~thread_desktop_t();
+
+    thread_desktop_t(const thread_desktop_t &) = delete;
+    thread_desktop_t &operator=(const thread_desktop_t &) = delete;
+
+    /**
+     * @brief Attach the calling thread to a desktop and close the previously attached one.
+     *
+     * @param desktop Desktop to attach. It is closed if the thread can't be attached to it.
+     * @return `ERROR_SUCCESS`, or the `SetThreadDesktop()` error if the thread stays on its current desktop.
+     */
+    DWORD attach(desktop_t desktop);
+
+    /**
+     * @brief Get the attached desktop.
+     *
+     * @return The attached desktop, or `nullptr` if none is attached.
+     */
+    HDESK get();
+
+  private:
+    HDESK original_desktop;  ///< Desktop the thread used before. GetThreadDesktop() handles need no closing.
+    desktop_t attached_desktop;  ///< Desktop the thread is attached to through this object.
+  };
+
+  /**
+   * @brief Open the desktop that receives user input, which is the secure desktop while the session is locked.
+   *
+   * @return The input desktop, or `nullptr` with the error in `GetLastError()`.
+   */
+  desktop_t open_input_desktop();
+
+  /**
+   * @brief Attach the calling thread to the input desktop.
+   *
+   * The thread stays there until the next call, and returns to its original desktop when it exits.
+   *
+   * @return The attached input desktop, or `nullptr` on failure.
    */
   HDESK syncThreadDesktop();
 
@@ -49,15 +103,16 @@ namespace platf {
 
   /**
    * @brief Attach the calling thread to the input desktop until destroyed.
+   *
+   * The display configuration API only works on threads attached to the input desktop. The thread stays on its
+   * current desktop if the input desktop can't be opened or attached.
    */
-  class input_desktop_guard_t {
+  class input_desktop_guard_t: public thread_desktop_t {
   public:
+    /**
+     * @brief Attach the calling thread to the input desktop if possible.
+     */
     input_desktop_guard_t();
-    ~input_desktop_guard_t();
-
-  private:
-    HDESK previous_desktop {GetThreadDesktop(GetCurrentThreadId())};
-    desktop_t input_desktop {OpenInputDesktop(DF_ALLOWOTHERACCOUNTHOOK, FALSE, GENERIC_ALL)};
   };
 
   /**

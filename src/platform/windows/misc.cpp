@@ -241,43 +241,59 @@ namespace platf {
     return "00:00:00:00:00:00"s;
   }
 
-  /**
-   * @brief Synchronize thread desktop.
-   */
-  HDESK syncThreadDesktop() {
-    // Windows can't close the desktop a thread uses, so its handle is kept until the thread moves on
-    thread_local desktop_t attached_desktop;
+  thread_desktop_t::thread_desktop_t():
+      original_desktop {GetThreadDesktop(GetCurrentThreadId())} {
+  }
 
-    desktop_t hDesk {OpenInputDesktop(DF_ALLOWOTHERACCOUNTHOOK, FALSE, GENERIC_ALL)};
-    if (!hDesk) {
+  thread_desktop_t::~thread_desktop_t() {
+    if (attached_desktop && !SetThreadDesktop(original_desktop)) {
+      BOOST_LOG(warning) << "Failed to restore the thread desktop [0x"sv << util::hex(GetLastError()).to_string_view() << ']';
+      // The thread is still on the attached desktop, so its handle has to stay open
+      attached_desktop.release();
+    }
+  }
+
+  DWORD thread_desktop_t::attach(desktop_t desktop) {
+    if (!SetThreadDesktop(desktop.get())) {
+      return GetLastError();
+    }
+
+    // Close the previous desktop only now that the thread no longer uses it
+    attached_desktop = std::move(desktop);
+    return ERROR_SUCCESS;
+  }
+
+  HDESK thread_desktop_t::get() {
+    return attached_desktop.get();
+  }
+
+  desktop_t open_input_desktop() {
+    return desktop_t {OpenInputDesktop(DF_ALLOWOTHERACCOUNTHOOK, FALSE, GENERIC_ALL)};
+  }
+
+  HDESK syncThreadDesktop() {
+    thread_local thread_desktop_t thread_desktop;
+
+    auto desktop = open_input_desktop();
+    if (!desktop) {
       auto err = GetLastError();
       BOOST_LOG(error) << "Failed to Open Input Desktop [0x"sv << util::hex(err).to_string_view() << ']';
 
       return nullptr;
     }
 
-    if (!SetThreadDesktop(hDesk.get())) {
-      auto err = GetLastError();
+    if (auto err = thread_desktop.attach(std::move(desktop))) {
       BOOST_LOG(error) << "Failed to sync desktop to thread [0x"sv << util::hex(err).to_string_view() << ']';
 
       return nullptr;
     }
 
-    attached_desktop = std::move(hDesk);
-    return attached_desktop.get();
+    return thread_desktop.get();
   }
 
   input_desktop_guard_t::input_desktop_guard_t() {
-    if (input_desktop && !SetThreadDesktop(input_desktop.get())) {
-      input_desktop.reset();
-    }
-  }
-
-  input_desktop_guard_t::~input_desktop_guard_t() {
-    if (input_desktop && !SetThreadDesktop(previous_desktop)) {
-      // The thread is still on the input desktop, so its handle has to stay open
-      BOOST_LOG(warning) << "Failed to restore the thread desktop [0x"sv << util::hex(GetLastError()).to_string_view() << ']';
-      input_desktop.release();
+    if (auto desktop = open_input_desktop()) {
+      attach(std::move(desktop));
     }
   }
 
